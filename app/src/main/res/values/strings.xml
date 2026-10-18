@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">عدسة HD</string>
+    <string name="photo">صورة</string>
+    <string name="video">فيديو</string>
+    <string name="whatsapp_original">إرسال عبر واتساب (الجودة الأصلية)</string>
+    <string name="share_other">مشاركة عبر تطبيق آخر</string>
+    <string name="original_hint">يُرسل الملف الأصلي كمستند بدون أي ضغط</string>
+</resources>
