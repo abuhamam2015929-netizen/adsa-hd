@@ -5,6 +5,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ColorMatrix
 import android.graphics.Matrix
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -27,13 +28,13 @@ object MediaSaver {
         SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
 
     /** يحفظ الصورة (بعد التحسين إن كان مفعّلاً) في معرض الصور داخل مجلد AdsaHD. */
-    fun savePhoto(ctx: Context, src: File, enhance: Boolean): Uri? {
+    fun savePhoto(ctx: Context, src: File, enhance: Boolean, filter: ColorMatrix? = null): Uri? {
         var data = src
         var enhanced: File? = null
-        if (enhance) {
+        if (enhance || filter != null) {
             try {
                 val out = File(ctx.cacheDir, "enh_${System.nanoTime()}.jpg")
-                ImageEnhancer.enhance(src, out)
+                ImageEnhancer.process(src, out, enhance, filter)
                 enhanced = out
                 data = out
             } catch (_: Throwable) {

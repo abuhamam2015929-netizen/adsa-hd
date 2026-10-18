@@ -152,19 +152,118 @@
         android:orientation="vertical"
         android:paddingTop="20dp">
 
-        <TextView
-            android:id="@+id/zoomChip"
+        <!-- لوحة الفلاتر / التعريض (إحداهما تظهر عند الطلب) -->
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <LinearLayout
+                android:id="@+id/evPanel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="24dp"
+                android:paddingTop="6dp"
+                android:paddingEnd="24dp"
+                android:paddingBottom="6dp"
+                android:visibility="gone">
+
+                <SeekBar
+                    android:id="@+id/evSeek"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1" />
+
+                <TextView
+                    android:id="@+id/evLabel"
+                    android:layout_width="78dp"
+                    android:layout_height="wrap_content"
+                    android:gravity="end"
+                    android:text="0.0 EV"
+                    android:textColor="@color/accent"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <HorizontalScrollView
+                android:id="@+id/filterScroll"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:scrollbars="none"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:id="@+id/filterRow"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:paddingStart="12dp"
+                    android:paddingTop="6dp"
+                    android:paddingEnd="12dp"
+                    android:paddingBottom="6dp" />
+            </HorizontalScrollView>
+        </FrameLayout>
+
+        <!-- أنماط الشركة المصنعة (HDR / ليل / ...) تظهر فقط إن دعمها الجهاز -->
+        <HorizontalScrollView
+            android:id="@+id/styleScroll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:scrollbars="none"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:id="@+id/styleRow"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingStart="12dp"
+                android:paddingTop="4dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="4dp" />
+        </HorizontalScrollView>
+
+        <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:background="@drawable/bg_chip"
-            android:paddingStart="14dp"
-            android:paddingTop="5dp"
-            android:paddingEnd="14dp"
-            android:paddingBottom="5dp"
-            android:text="1.0×"
-            android:textColor="@color/accent"
-            android:textSize="13sp"
-            android:textStyle="bold" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <ImageButton
+                android:id="@+id/btnEv"
+                android:layout_width="42dp"
+                android:layout_height="42dp"
+                android:background="@drawable/bg_round_button"
+                android:contentDescription="Exposure"
+                android:padding="10dp"
+                android:src="@drawable/ic_brightness" />
+
+            <TextView
+                android:id="@+id/zoomChip"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="18dp"
+                android:layout_marginEnd="18dp"
+                android:background="@drawable/bg_chip"
+                android:paddingStart="14dp"
+                android:paddingTop="5dp"
+                android:paddingEnd="14dp"
+                android:paddingBottom="5dp"
+                android:text="1.0×"
+                android:textColor="@color/accent"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <ImageButton
+                android:id="@+id/btnFilters"
+                android:layout_width="42dp"
+                android:layout_height="42dp"
+                android:background="@drawable/bg_round_button"
+                android:contentDescription="Filters"
+                android:padding="10dp"
+                android:src="@drawable/ic_filters" />
+        </LinearLayout>
 
         <LinearLayout
             android:layout_width="wrap_content"

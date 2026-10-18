@@ -8,8 +8,11 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.ImageFormat
+import android.graphics.Paint
 import android.graphics.SurfaceTexture
+import android.graphics.Typeface
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
@@ -27,9 +30,14 @@ import android.view.MotionEvent
 import android.view.OrientationEventListener
 import android.view.ScaleGestureDetector
 import android.view.Surface
+import android.view.TextureView
 import android.view.View
+import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageButton
+import android.widget.LinearLayout
+import android.widget.SeekBar
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -45,6 +53,8 @@ import androidx.camera.core.Preview
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.extensions.ExtensionMode
+import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.MediaStoreOutputOptions
@@ -54,6 +64,7 @@ import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
+import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -83,6 +94,7 @@ class MainActivity : AppCompatActivity() {
     private val sound = MediaActionSound()
 
     private var cameraProvider: ProcessCameraProvider? = null
+    private var extensionsManager: ExtensionsManager? = null
     private var camera: Camera? = null
     private var imageCapture: ImageCapture? = null
     private var videoCapture: VideoCapture<Recorder>? = null
@@ -94,6 +106,17 @@ class MainActivity : AppCompatActivity() {
     private var timerSeconds = 0
     private var enhance = true
     private var gridOn = false
+
+    // أنماط الشركة المصنعة (HDR، ليل...) عبر CameraX Extensions
+    private var photoStyle = ExtensionMode.NONE
+    private var styleOptions: List<Pair<Int, String>> = emptyList()
+
+    // الفلاتر والتعريض
+    private var selectedFilter: Filters.Filter = Filters.all[0]
+    private var filterPanelOpen = false
+    private var evPanelOpen = false
+    private var evLower = 0
+    private var evStep = 0f
 
     private var videoOptions: List<VideoOption> = emptyList()
     private var videoOptionIndex = 0
@@ -143,13 +166,20 @@ class MainActivity : AppCompatActivity() {
         setupInsets()
         setupGestures()
         setupButtons()
+        buildFilterRow()
         applyModeLayout()
         updateTabs()
         updateShutter()
         updateFlashIcon()
+        updatePanels()
         tint(b.btnTimer, false)
         tint(b.btnGrid, false)
         tint(b.btnEnhance, enhance)
+
+        // أعد تطبيق الفلتر الحي كلما بدأ البث (يُعاد إنشاء TextureView عند كل ربط)
+        b.previewView.previewStreamState.observe(this) { state ->
+            if (state == PreviewView.StreamState.STREAMING) applyLiveFilter()
+        }
 
         orientationListener = object : OrientationEventListener(this) {
             override fun onOrientationChanged(orientation: Int) {
@@ -211,7 +241,7 @@ class MainActivity : AppCompatActivity() {
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             topInset = bars.top
             b.topBar.setPadding(dp(12), bars.top + dp(8), dp(12), dp(8))
-            b.bottomPanel.setPadding(0, dp(20), 0, bars.bottom + dp(14))
+            b.bottomPanel.setPadding(0, dp(12), 0, bars.bottom + dp(14))
             (b.recTimer.layoutParams as FrameLayout.LayoutParams).topMargin = bars.top + dp(64)
             applyModeLayout()
             insets
@@ -284,6 +314,7 @@ class MainActivity : AppCompatActivity() {
                 CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
             videoOptionIndex = 0
             useFpsRange = true
+            photoStyle = ExtensionMode.NONE
             b.btnFlip.animate().rotationBy(180f).setDuration(250).start()
             bindCamera()
         }
@@ -315,8 +346,33 @@ class MainActivity : AppCompatActivity() {
         b.btnEnhance.setOnClickListener {
             enhance = !enhance
             tint(b.btnEnhance, enhance)
-            toast(if (enhance) "التحسين التلقائي: مفعّل" else "التحسين التلقائي: متوقف (الصورة الخام)")
+            toast(if (enhance) "التحسين التلقائي: مفعّل" else "التحسين التلقائي: متوقف (الصورة كما التقطتها الكاميرا)")
         }
+
+        b.btnEv.setOnClickListener {
+            evPanelOpen = !evPanelOpen
+            if (evPanelOpen) filterPanelOpen = false
+            updatePanels()
+        }
+
+        b.btnFilters.setOnClickListener {
+            if (isVideoMode) return@setOnClickListener
+            filterPanelOpen = !filterPanelOpen
+            if (filterPanelOpen) evPanelOpen = false
+            updatePanels()
+        }
+
+        b.evSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                val index = progress + evLower
+                camera?.cameraControl?.setExposureCompensationIndex(index)
+                updateEvLabel(index)
+            }
+
+            override fun onStartTrackingTouch(sb: SeekBar) = Unit
+            override fun onStopTrackingTouch(sb: SeekBar) = Unit
+        })
 
         b.tabPhoto.setOnClickListener { setMode(false) }
         b.tabVideo.setOnClickListener { setMode(true) }
@@ -373,9 +429,11 @@ class MainActivity : AppCompatActivity() {
         isVideoMode = video
         videoOptionIndex = 0
         useFpsRange = true
+        photoStyle = ExtensionMode.NONE
         applyModeLayout()
         updateTabs()
         updateShutter()
+        updatePanels()
         bindCamera()
     }
 
@@ -419,6 +477,105 @@ class MainActivity : AppCompatActivity() {
         button.imageTintList = ColorStateList.valueOf(c)
     }
 
+    // ------------------------------------------------------------------ filters / exposure / styles UI
+
+    private fun addChip(row: LinearLayout, text: String, selected: Boolean, onClick: () -> Unit) {
+        val tv = TextView(this).apply {
+            this.text = text
+            setTextColor(if (selected) ContextCompat.getColor(this@MainActivity, R.color.accent) else Color.WHITE)
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(14), dp(6), dp(14), dp(6))
+            setBackgroundResource(R.drawable.bg_chip)
+            setOnClickListener { onClick() }
+        }
+        val lp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            marginStart = dp(4)
+            marginEnd = dp(4)
+        }
+        row.addView(tv, lp)
+    }
+
+    private fun buildFilterRow() {
+        b.filterRow.removeAllViews()
+        for (f in Filters.all) {
+            addChip(b.filterRow, f.label, f === selectedFilter) {
+                selectedFilter = f
+                buildFilterRow()
+                applyLiveFilter()
+                updatePanels()
+            }
+        }
+    }
+
+    private fun updatePanels() {
+        b.evPanel.visibility = if (evPanelOpen) View.VISIBLE else View.GONE
+        b.filterScroll.visibility = if (filterPanelOpen && !isVideoMode) View.VISIBLE else View.GONE
+        tint(b.btnEv, evPanelOpen)
+        tint(b.btnFilters, filterPanelOpen || selectedFilter.matrix != null)
+        b.btnFilters.alpha = if (isVideoMode) 0.3f else 1f
+    }
+
+    private fun updateStyleRow() {
+        b.styleRow.removeAllViews()
+        if (isVideoMode || styleOptions.isEmpty()) {
+            b.styleScroll.visibility = View.GONE
+            return
+        }
+        b.styleScroll.visibility = View.VISIBLE
+        addChip(b.styleRow, "عادي", photoStyle == ExtensionMode.NONE) {
+            photoStyle = ExtensionMode.NONE
+            bindCamera()
+        }
+        for ((mode, label) in styleOptions) {
+            addChip(b.styleRow, label, photoStyle == mode) {
+                photoStyle = mode
+                bindCamera()
+            }
+        }
+    }
+
+    private fun updateEvLabel(index: Int) {
+        b.evLabel.text = String.format(Locale.US, "%+.1f EV", index * evStep)
+    }
+
+    private fun setupExposure(cam: Camera) {
+        val st = cam.cameraInfo.exposureState
+        if (!st.isExposureCompensationSupported) {
+            b.evSeek.isEnabled = false
+            b.btnEv.alpha = 0.3f
+            return
+        }
+        b.btnEv.alpha = 1f
+        b.evSeek.isEnabled = true
+        val range = st.exposureCompensationRange
+        evLower = range.lower
+        evStep = st.exposureCompensationStep.toFloat()
+        b.evSeek.max = range.upper - range.lower
+        b.evSeek.progress = -range.lower
+        updateEvLabel(0)
+    }
+
+    /** الفلتر الحي على المعاينة (TextureView داخل PreviewView). */
+    private fun applyLiveFilter() {
+        val tv = findTextureView(b.previewView) ?: return
+        val m = if (isVideoMode) null else selectedFilter.matrix
+        val paint = if (m != null) Paint().apply { colorFilter = ColorMatrixColorFilter(m) } else null
+        tv.setLayerType(View.LAYER_TYPE_HARDWARE, paint)
+    }
+
+    private fun findTextureView(v: View): TextureView? {
+        if (v is TextureView) return v
+        if (v is ViewGroup) {
+            for (i in 0 until v.childCount) {
+                findTextureView(v.getChildAt(i))?.let { return it }
+            }
+        }
+        return null
+    }
+
     // ------------------------------------------------------------------ camera binding
 
     private fun startCamera() {
@@ -428,8 +585,17 @@ class MainActivity : AppCompatActivity() {
         }
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
-            cameraProvider = future.get()
-            bindCamera()
+            val provider = future.get()
+            cameraProvider = provider
+            try {
+                val extFuture = ExtensionsManager.getInstanceAsync(this, provider)
+                extFuture.addListener({
+                    extensionsManager = try { extFuture.get() } catch (_: Throwable) { null }
+                    bindCamera()
+                }, ContextCompat.getMainExecutor(this))
+            } catch (_: Throwable) {
+                bindCamera()
+            }
         }, ContextCompat.getMainExecutor(this))
     }
 
@@ -438,6 +604,20 @@ class MainActivity : AppCompatActivity() {
 
     private fun safeHasCamera(provider: ProcessCameraProvider, selector: CameraSelector) =
         try { provider.hasCamera(selector) } catch (_: Exception) { false }
+
+    private fun computeStyles(selector: CameraSelector): List<Pair<Int, String>> {
+        val em = extensionsManager ?: return emptyList()
+        val all = listOf(
+            ExtensionMode.HDR to "HDR",
+            ExtensionMode.NIGHT to "ليل",
+            ExtensionMode.AUTO to "تلقائي",
+            ExtensionMode.FACE_RETOUCH to "تجميل",
+            ExtensionMode.BOKEH to "بورتريه"
+        )
+        return all.filter {
+            try { em.isExtensionAvailable(selector, it.first) } catch (_: Throwable) { false }
+        }
+    }
 
     private fun bindCamera() {
         val provider = cameraProvider ?: return
@@ -472,13 +652,37 @@ class MainActivity : AppCompatActivity() {
         val option = videoOptions[videoOptionIndex]
         val range = if (isVideoMode && useFpsRange) option.range else null
 
+        // أنماط الشركة المصنعة (HDR/ليل/...) إن كان الجهاز يدعمها
+        styleOptions = if (!isVideoMode) computeStyles(selector) else emptyList()
+        if (photoStyle != ExtensionMode.NONE && styleOptions.none { it.first == photoStyle }) {
+            photoStyle = ExtensionMode.NONE
+        }
+        val useExt = !isVideoMode && photoStyle != ExtensionMode.NONE
+        val bindSelector = if (useExt) {
+            try {
+                extensionsManager!!.getExtensionEnabledCameraSelector(selector, photoStyle)
+            } catch (_: Throwable) {
+                photoStyle = ExtensionMode.NONE
+                selector
+            }
+        } else selector
+        val extActive = useExt && photoStyle != ExtensionMode.NONE
+
         try {
-            camera = bindUseCases(provider, selector, option, range)
+            camera = bindUseCases(provider, bindSelector, option, range, extActive, chars)
         } catch (e: Exception) {
-            if (range != null) {
+            if (extActive) {
+                photoStyle = ExtensionMode.NONE
+                toast("هذا النمط غير متاح حالياً على جهازك")
+                try {
+                    camera = bindUseCases(provider, selector, option, null, false, chars)
+                } catch (e2: Exception) {
+                    toast("تعذّر تشغيل الكاميرا: ${e2.message}")
+                }
+            } else if (range != null) {
                 useFpsRange = false
                 try {
-                    camera = bindUseCases(provider, selector, option, null)
+                    camera = bindUseCases(provider, selector, option, null, false, chars)
                 } catch (e2: Exception) {
                     toast("تعذّر تشغيل الكاميرا: ${e2.message}")
                 }
@@ -486,6 +690,8 @@ class MainActivity : AppCompatActivity() {
                 toast("تعذّر تشغيل الكاميرا: ${e.message}")
             }
         }
+
+        updateStyleRow()
 
         camera?.let { cam ->
             cam.cameraInfo.zoomState.observe(this) { z ->
@@ -501,32 +707,38 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+            setupExposure(cam)
         }
         applyFlash()
         updateChip()
+        applyLiveFilter()
     }
 
     private fun bindUseCases(
         provider: ProcessCameraProvider,
         selector: CameraSelector,
         option: VideoOption,
-        range: Range<Int>?
+        range: Range<Int>?,
+        extActive: Boolean,
+        chars: CameraCharacteristics?
     ): Camera {
-        // المعاينة بحجم معقول (لا حاجة لأعلى دقة)
-        val previewSelector = ResolutionSelector.Builder()
-            .setAspectRatioStrategy(
-                if (isVideoMode) AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
-                else AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
-            )
-            .setResolutionStrategy(
-                ResolutionStrategy(
-                    if (isVideoMode) Size(1920, 1080) else Size(1440, 1080),
-                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
+        val previewBuilder = Preview.Builder()
+        if (!extActive) {
+            // المعاينة بحجم معقول (لا حاجة لأعلى دقة)
+            val previewSelector = ResolutionSelector.Builder()
+                .setAspectRatioStrategy(
+                    if (isVideoMode) AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
+                    else AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
                 )
-            )
-            .build()
-
-        val previewBuilder = Preview.Builder().setResolutionSelector(previewSelector)
+                .setResolutionStrategy(
+                    ResolutionStrategy(
+                        if (isVideoMode) Size(1920, 1080) else Size(1440, 1080),
+                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
+                    )
+                )
+                .build()
+            previewBuilder.setResolutionSelector(previewSelector)
+        }
         if (range != null) {
             Camera2Interop.Extender(previewBuilder)
                 .setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
@@ -553,22 +765,66 @@ class MainActivity : AppCompatActivity() {
             videoCapture = vc
             cam = provider.bindToLifecycle(this, selector, preview, vc)
         } else {
-            // أعلى دقة ممكنة + أعلى جودة JPEG
-            val captureSelector = ResolutionSelector.Builder()
-                .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
-                .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
-                .build()
-            val ic = ImageCapture.Builder()
-                .setResolutionSelector(captureSelector)
+            val icBuilder = ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                 .setJpegQuality(100)
                 .setFlashMode(flashMode)
-                .build()
+            if (!extActive) {
+                // أعلى دقة ممكنة
+                icBuilder.setResolutionSelector(
+                    ResolutionSelector.Builder()
+                        .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                        .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
+                        .build()
+                )
+                applyQualityModes(icBuilder, chars)
+            }
+            val ic = icBuilder.build()
             imageCapture = ic
             cam = provider.bindToLifecycle(this, selector, preview, ic)
         }
         activeRange = range
         return cam
+    }
+
+    /** يطلب من الكاميرا أعلى جودة لخفض التشويش وتحسين الحدّة (فقط ما يدعمه الجهاز). */
+    private fun applyQualityModes(builder: ImageCapture.Builder, chars: CameraCharacteristics?) {
+        if (chars == null) return
+        val ext = Camera2Interop.Extender(builder)
+
+        fun supports(key: CameraCharacteristics.Key<IntArray>, value: Int): Boolean =
+            chars.get(key)?.contains(value) == true
+
+        if (supports(
+                CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES,
+                CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY
+            )
+        ) ext.setCaptureRequestOption(
+            CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY
+        )
+
+        if (supports(
+                CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES,
+                CaptureRequest.EDGE_MODE_HIGH_QUALITY
+            )
+        ) ext.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY)
+
+        if (supports(
+                CameraCharacteristics.COLOR_CORRECTION_AVAILABLE_ABERRATION_MODES,
+                CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY
+            )
+        ) ext.setCaptureRequestOption(
+            CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE,
+            CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY
+        )
+
+        if (supports(
+                CameraCharacteristics.HOT_PIXEL_AVAILABLE_HOT_PIXEL_MODES,
+                CaptureRequest.HOT_PIXEL_MODE_HIGH_QUALITY
+            )
+        ) ext.setCaptureRequestOption(
+            CaptureRequest.HOT_PIXEL_MODE, CaptureRequest.HOT_PIXEL_MODE_HIGH_QUALITY
+        )
     }
 
     private fun applyFlash() {
@@ -717,6 +973,10 @@ class MainActivity : AppCompatActivity() {
         val tmp = File.createTempFile("cap_", ".jpg", cacheDir)
         val options = ImageCapture.OutputFileOptions.Builder(tmp).build()
 
+        // نثبّت الإعدادات لحظة الضغط (حتى لو غيّرها المستخدم أثناء المعالجة)
+        val doEnhance = enhance
+        val filterMatrix = selectedFilter.matrix
+
         sound.play(MediaActionSound.SHUTTER_CLICK)
         b.flashOverlay.alpha = 0.7f
         b.flashOverlay.animate().alpha(0f).setDuration(200).start()
@@ -724,7 +984,7 @@ class MainActivity : AppCompatActivity() {
         ic.takePicture(options, executor, object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                 val uri = try {
-                    MediaSaver.savePhoto(applicationContext, tmp, enhance)
+                    MediaSaver.savePhoto(applicationContext, tmp, doEnhance, filterMatrix)
                 } catch (_: Throwable) {
                     null
                 } finally {
