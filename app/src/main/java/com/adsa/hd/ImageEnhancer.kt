@@ -6,6 +6,7 @@ import android.graphics.ColorMatrix
 import androidx.exifinterface.media.ExifInterface
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
@@ -28,14 +29,18 @@ object ImageEnhancer {
     private const val SHARPEN_AMOUNT = 0.35f
     private const val JPEG_QUALITY = 100
 
-    fun process(src: File, dst: File, autoEnhance: Boolean, filter: ColorMatrix?) {
+    fun process(
+        src: File, dst: File, autoEnhance: Boolean, filter: ColorMatrix?,
+        portrait: PortraitSpec? = null, night: Boolean = false
+    ) {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(src.absolutePath, bounds)
         val fullW = bounds.outWidth
         val fullH = bounds.outHeight
         require(fullW > 0 && fullH > 0) { "bad image" }
 
-        val lut = if (autoEnhance) buildLut(src, max(fullW, fullH)) else IntArray(256) { it }
+        val doTone = autoEnhance || night
+        val lut = if (doTone) buildLut(src, max(fullW, fullH), night) else IntArray(256) { it }
 
         var sample = 1
         while (fullW.toLong() * fullH / (sample.toLong() * sample) > MAX_PIXELS) sample *= 2
@@ -47,8 +52,21 @@ object ImageEnhancer {
         val bmp = BitmapFactory.decodeFile(src.absolutePath, opts)
             ?: throw IllegalStateException("decode failed")
 
-        applyTone(bmp, lut, if (autoEnhance) SATURATION else 1f, filter)
-        if (autoEnhance) sharpen(bmp, SHARPEN_AMOUNT)
+        applyTone(bmp, lut, if (doTone) SATURATION else 1f, filter)
+        if (night) { denoise(bmp); denoise(bmp) }
+        if (doTone) sharpen(bmp, if (night) 0.42f else SHARPEN_AMOUNT)
+        if (portrait != null) {
+            try {
+                val orientation = try {
+                    ExifInterface(src.absolutePath).getAttributeInt(
+                        ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL
+                    )
+                } catch (_: Throwable) { ExifInterface.ORIENTATION_NORMAL }
+                PortraitProcessor.apply(bmp, portrait, orientation)
+            } catch (_: Throwable) {
+                // لو فشل البورتريه نكمل بالصورة بدون عزل
+            }
+        }
 
         FileOutputStream(dst).use { bmp.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, it) }
         bmp.recycle()
@@ -58,7 +76,7 @@ object ImageEnhancer {
 
     // ------------------------------------------------------------------ tone
 
-    private fun buildLut(src: File, maxDim: Int): IntArray {
+    private fun buildLut(src: File, maxDim: Int, night: Boolean): IntArray {
         var sample = 1
         while (maxDim / sample > 512) sample *= 2
         val small = BitmapFactory.decodeFile(
@@ -99,9 +117,10 @@ object ImageEnhancer {
         }
         mean = (mean / total).coerceIn(0.05f, 0.95f)
 
-        var gamma = (ln(TARGET_MEAN.toDouble()) / ln(mean.toDouble())).toFloat()
-        gamma = 1f + (gamma - 1f) * 0.6f
-        gamma = gamma.coerceIn(0.8f, 1.15f)
+        val target = if (night) 0.52f else TARGET_MEAN
+        var gamma = (ln(target.toDouble()) / ln(mean.toDouble())).toFloat()
+        gamma = 1f + (gamma - 1f) * (if (night) 0.95f else 0.6f)
+        gamma = gamma.coerceIn(if (night) 0.6f else 0.8f, 1.15f)
 
         return IntArray(256) { i ->
             var v = ((i - loPoint) / range).coerceIn(0f, 1f)
@@ -156,6 +175,68 @@ object ImageEnhancer {
                 buf[i] = (p and 0xFF000000.toInt()) or (r shl 16) or (g shl 8) or b
             }
             bmp.setPixels(buf, 0, w, 0, y, w, n)
+            y += n
+        }
+    }
+
+    // ------------------------------------------------------------------ denoise
+
+    /** إزالة ضوضاء خفيفة: تنعيم اللون 3×3 + تنعيم السطوع في المناطق الملساء فقط (يحفظ الحواف). */
+    private fun denoise(bmp: Bitmap) {
+        val w = bmp.width
+        val h = bmp.height
+        val rows = max(1, 500_000 / w)
+        val src = IntArray(w * (rows + 1))
+        val out = IntArray(w * rows)
+        val prev = IntArray(w)
+        var havePrev = false
+
+        var y = 0
+        while (y < h) {
+            val n = min(rows, h - y)
+            val readRows = min(n + 1, h - y)
+            bmp.getPixels(src, 0, w, 0, y, w, readRows)
+            for (r in 0 until n) {
+                val cur = r * w
+                val up: IntArray
+                val upOff: Int
+                if (r == 0) {
+                    if (havePrev) { up = prev; upOff = 0 } else { up = src; upOff = cur }
+                } else { up = src; upOff = cur - w }
+                val downOff = if (r + 1 < readRows) cur + w else cur
+                for (x in 0 until w) {
+                    val xl = max(x - 1, 0)
+                    val xr = min(x + 1, w - 1)
+                    var sr = 0; var sg = 0; var sb = 0
+                    for (k in 0 until 9) {
+                        val arr: IntArray
+                        val off: Int
+                        when (k / 3) {
+                            0 -> { arr = up; off = upOff }
+                            1 -> { arr = src; off = cur }
+                            else -> { arr = src; off = downOff }
+                        }
+                        val xx = when (k % 3) { 0 -> xl; 1 -> x; else -> xr }
+                        val p = arr[off + xx]
+                        sr += (p shr 16) and 255; sg += (p shr 8) and 255; sb += p and 255
+                    }
+                    val ar = sr / 9; val ag = sg / 9; val ab = sb / 9
+                    val c = src[cur + x]
+                    val cr = (c shr 16) and 255; val cg = (c shr 8) and 255; val cb = c and 255
+                    val y0 = (cr * 77 + cg * 151 + cb * 28) shr 8
+                    val ay = (ar * 77 + ag * 151 + ab * 28) shr 8
+                    val diff = abs(y0 - ay)
+                    val wgt = (1f - min(diff / 26f, 1f))
+                    val yn = y0 + ((ay - y0) * wgt).toInt()
+                    val nr = (yn + (ar - ay)).coerceIn(0, 255)
+                    val ng = (yn + (ag - ay)).coerceIn(0, 255)
+                    val nb = (yn + (ab - ay)).coerceIn(0, 255)
+                    out[cur + x] = (c and 0xFF000000.toInt()) or (nr shl 16) or (ng shl 8) or nb
+                }
+            }
+            bmp.setPixels(out, 0, w, 0, y, w, n)
+            System.arraycopy(src, (n - 1) * w, prev, 0, w)
+            havePrev = true
             y += n
         }
     }
@@ -245,7 +326,7 @@ object ImageEnhancer {
         ExifInterface.TAG_ORIENTATION
     )
 
-    private fun copyExif(src: File, dst: File) {
+    internal fun copyExif(src: File, dst: File) {
         try {
             val from = ExifInterface(src.absolutePath)
             val to = ExifInterface(dst.absolutePath)

@@ -28,13 +28,16 @@ object MediaSaver {
         SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
 
     /** يحفظ الصورة (بعد التحسين إن كان مفعّلاً) في معرض الصور داخل مجلد AdsaHD. */
-    fun savePhoto(ctx: Context, src: File, enhance: Boolean, filter: ColorMatrix? = null): Uri? {
+    fun savePhoto(
+        ctx: Context, src: File, enhance: Boolean, filter: ColorMatrix? = null,
+        portrait: PortraitSpec? = null, night: Boolean = false
+    ): Uri? {
         var data = src
         var enhanced: File? = null
-        if (enhance || filter != null) {
+        if (enhance || filter != null || portrait != null || night) {
             try {
                 val out = File(ctx.cacheDir, "enh_${System.nanoTime()}.jpg")
-                ImageEnhancer.process(src, out, enhance, filter)
+                ImageEnhancer.process(src, out, enhance, filter, portrait, night)
                 enhanced = out
                 data = out
             } catch (_: Throwable) {

@@ -44,6 +44,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
+import androidx.camera.core.CameraEffect
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
@@ -118,6 +120,20 @@ class MainActivity : AppCompatActivity() {
     private var evLower = 0
     private var evStep = 0f
 
+    // بورتريه / ثبات / ليل ذكي / معالجة حية
+    private var portraitOn = false
+    private var blurLevel = 3
+    private var focusFx = 0.5f
+    private var focusFy = 0.5f
+    private var focusTapped = false
+    private var stabilize = true
+    private var stabSupported = false
+    private var nightSoft = false
+    private var nightBusy = false
+    private var glDisabled = false
+    private var effectActive = false
+    private var glProcessor: GlEffect.Processor? = null
+
     private var videoOptions: List<VideoOption> = emptyList()
     private var videoOptionIndex = 0
     private var useFpsRange = true
@@ -175,6 +191,7 @@ class MainActivity : AppCompatActivity() {
         tint(b.btnTimer, false)
         tint(b.btnGrid, false)
         tint(b.btnEnhance, enhance)
+        tint(b.btnPortrait, false)
 
         // أعد تطبيق الفلتر الحي كلما بدأ البث (يُعاد إنشاء TextureView عند كل ربط)
         b.previewView.previewStreamState.observe(this) { state ->
@@ -215,6 +232,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         recording?.stop()
+        glProcessor?.release()
         executor.shutdown()
         sound.release()
         super.onDestroy()
@@ -301,9 +319,11 @@ class MainActivity : AppCompatActivity() {
         b.shutter.setOnClickListener {
             b.shutter.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
             when {
+                nightBusy -> Unit
                 countdownRunning -> cancelCountdown()
                 isVideoMode && recording != null -> stopRecording()
                 isVideoMode -> startWithTimer { startRecording() }
+                nightSoft && photoStyle == ExtensionMode.NONE -> startWithTimer { takeNightPhoto() }
                 else -> startWithTimer { takePhoto() }
             }
         }
@@ -355,8 +375,25 @@ class MainActivity : AppCompatActivity() {
             updatePanels()
         }
 
+        b.btnPortrait.setOnClickListener {
+            portraitOn = !portraitOn
+            if (portraitOn) toast("بورتريه: اضغط على الشخص أو العنصر لتحديد التركيز")
+            updatePanels()
+            if (isVideoMode && effectActive) pushBlur() else if (!(isVideoMode && recording != null)) bindCamera()
+        }
+
+        b.blurSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                blurLevel = progress + 1
+                updateBlurLabel()
+                pushBlur()
+            }
+
+            override fun onStartTrackingTouch(sb: SeekBar) = Unit
+            override fun onStopTrackingTouch(sb: SeekBar) = Unit
+        })
+
         b.btnFilters.setOnClickListener {
-            if (isVideoMode) return@setOnClickListener
             filterPanelOpen = !filterPanelOpen
             if (filterPanelOpen) evPanelOpen = false
             updatePanels()
@@ -512,29 +549,89 @@ class MainActivity : AppCompatActivity() {
 
     private fun updatePanels() {
         b.evPanel.visibility = if (evPanelOpen) View.VISIBLE else View.GONE
-        b.filterScroll.visibility = if (filterPanelOpen && !isVideoMode) View.VISIBLE else View.GONE
+        b.filterScroll.visibility = if (filterPanelOpen) View.VISIBLE else View.GONE
+        b.portraitPanel.visibility = if (portraitOn) View.VISIBLE else View.GONE
         tint(b.btnEv, evPanelOpen)
         tint(b.btnFilters, filterPanelOpen || selectedFilter.matrix != null)
-        b.btnFilters.alpha = if (isVideoMode) 0.3f else 1f
+        tint(b.btnPortrait, portraitOn)
+        updateBlurLabel()
+    }
+
+    private fun updateBlurLabel() {
+        b.blurLabel.text = "العزل $blurLevel/5"
+    }
+
+    private fun processor(): GlEffect.Processor {
+        var p = glProcessor
+        if (p == null) {
+            p = GlEffect.Processor()
+            glProcessor = p
+        }
+        return p
+    }
+
+    private fun pushBlur() {
+        glProcessor?.setBlur(if (portraitOn) blurLevel else 0, focusFx, 1f - focusFy)
+    }
+
+    private fun onGlError(t: Throwable) {
+        runOnUiThread {
+            if (glDisabled) return@runOnUiThread
+            glDisabled = true
+            toast("تعذّر تفعيل المعالجة الحية على جهازك، تم تعطيلها")
+            if (recording == null) bindCamera()
+        }
+    }
+
+    private fun setStab(ext: Camera2Interop.Extender<*>, chars: CameraCharacteristics?) {
+        if (chars == null) return
+        val eis = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
+            ?.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON) == true
+        val ois = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
+            ?.contains(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON) == true
+        if (eis) ext.setCaptureRequestOption(
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+        )
+        if (ois) ext.setCaptureRequestOption(
+            CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+            CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+        )
     }
 
     private fun updateStyleRow() {
         b.styleRow.removeAllViews()
-        if (isVideoMode || styleOptions.isEmpty()) {
-            b.styleScroll.visibility = View.GONE
-            return
-        }
-        b.styleScroll.visibility = View.VISIBLE
-        addChip(b.styleRow, "عادي", photoStyle == ExtensionMode.NONE) {
-            photoStyle = ExtensionMode.NONE
-            bindCamera()
-        }
-        for ((mode, label) in styleOptions) {
-            addChip(b.styleRow, label, photoStyle == mode) {
-                photoStyle = mode
-                bindCamera()
+        if (isVideoMode) {
+            if (stabSupported) {
+                addChip(b.styleRow, if (stabilize) "ثبات الفيديو: تشغيل" else "ثبات الفيديو: إيقاف", stabilize) {
+                    if (recording == null) {
+                        stabilize = !stabilize
+                        bindCamera()
+                    }
+                }
+            }
+        } else {
+            if (styleOptions.isNotEmpty()) {
+                addChip(b.styleRow, "عادي", photoStyle == ExtensionMode.NONE) {
+                    photoStyle = ExtensionMode.NONE
+                    bindCamera()
+                }
+                for ((mode, label) in styleOptions) {
+                    addChip(b.styleRow, label, photoStyle == mode) {
+                        photoStyle = mode
+                        bindCamera()
+                    }
+                }
+            }
+            if (photoStyle == ExtensionMode.NONE) {
+                addChip(b.styleRow, "ليل ذكي", nightSoft) {
+                    nightSoft = !nightSoft
+                    toast(if (nightSoft) "ليل ذكي: ثبّت الجوال أثناء الالتقاط (4 لقطات تُدمج)" else "ليل ذكي: متوقف")
+                    updateStyleRow()
+                }
             }
         }
+        b.styleScroll.visibility = if (b.styleRow.childCount > 0) View.VISIBLE else View.GONE
     }
 
     private fun updateEvLabel(index: Int) {
@@ -560,6 +657,11 @@ class MainActivity : AppCompatActivity() {
 
     /** الفلتر الحي على المعاينة (TextureView داخل PreviewView). */
     private fun applyLiveFilter() {
+        if (effectActive) {
+            glProcessor?.setColor(selectedFilter.matrix)
+            findTextureView(b.previewView)?.setLayerType(View.LAYER_TYPE_NONE, null)
+            return
+        }
         val tv = findTextureView(b.previewView) ?: return
         val m = if (isVideoMode) null else selectedFilter.matrix
         val paint = if (m != null) Paint().apply { colorFilter = ColorMatrixColorFilter(m) } else null
@@ -647,6 +749,12 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) { null }
         val chars = characteristicsFor(lensFacing)
         maxMegapixels = computeMegapixels(chars)
+        stabSupported = chars?.let {
+            it.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
+                ?.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON) == true ||
+                    it.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
+                        ?.contains(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON) == true
+        } ?: false
         videoOptions = buildVideoOptions(info, chars)
         if (videoOptionIndex !in videoOptions.indices) videoOptionIndex = 0
         val option = videoOptions[videoOptionIndex]
@@ -678,6 +786,18 @@ class MainActivity : AppCompatActivity() {
                     camera = bindUseCases(provider, selector, option, null, false, chars)
                 } catch (e2: Exception) {
                     toast("تعذّر تشغيل الكاميرا: ${e2.message}")
+                }
+            } else if (effectActive) {
+                glDisabled = true
+                toast("تعذّر تفعيل المعالجة الحية، تم تعطيلها")
+                try {
+                    camera = bindUseCases(provider, selector, option, range, false, chars)
+                } catch (e2: Exception) {
+                    try {
+                        camera = bindUseCases(provider, selector, option, null, false, chars)
+                    } catch (e3: Exception) {
+                        toast("تعذّر تشغيل الكاميرا: ${e3.message}")
+                    }
                 }
             } else if (range != null) {
                 useFpsRange = false
@@ -743,8 +863,23 @@ class MainActivity : AppCompatActivity() {
             Camera2Interop.Extender(previewBuilder)
                 .setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
         }
+        if (isVideoMode && stabilize) setStab(Camera2Interop.Extender(previewBuilder), chars)
         val preview = previewBuilder.build()
         preview.setSurfaceProvider(b.previewView.surfaceProvider)
+
+        // معالجة حية على GPU: فلاتر الفيديو + بورتريه (طمس الخلفية)
+        val useEffect = !extActive && !glDisabled && (isVideoMode || portraitOn)
+        effectActive = useEffect
+        val group = UseCaseGroup.Builder().addUseCase(preview)
+        if (useEffect) {
+            val p = processor()
+            p.onError = { t -> onGlError(t) }
+            p.setColor(selectedFilter.matrix)
+            p.setBlur(if (portraitOn) blurLevel else 0, focusFx, 1f - focusFy)
+            val targets = if (isVideoMode) CameraEffect.PREVIEW or CameraEffect.VIDEO_CAPTURE
+            else CameraEffect.PREVIEW
+            group.addEffect(GlEffect.Effect(targets, p) { t -> onGlError(t) })
+        }
 
         val cam: Camera
         if (isVideoMode) {
@@ -761,9 +896,11 @@ class MainActivity : AppCompatActivity() {
                 Camera2Interop.Extender(vb)
                     .setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
             }
+            if (stabilize) setStab(Camera2Interop.Extender(vb), chars)
             val vc = vb.build()
             videoCapture = vc
-            cam = provider.bindToLifecycle(this, selector, preview, vc)
+            group.addUseCase(vc)
+            cam = provider.bindToLifecycle(this, selector, group.build())
         } else {
             val icBuilder = ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
@@ -781,7 +918,8 @@ class MainActivity : AppCompatActivity() {
             }
             val ic = icBuilder.build()
             imageCapture = ic
-            cam = provider.bindToLifecycle(this, selector, preview, ic)
+            group.addUseCase(ic)
+            cam = provider.bindToLifecycle(this, selector, group.build())
         }
         activeRange = range
         return cam
@@ -912,6 +1050,12 @@ class MainActivity : AppCompatActivity() {
         ).setAutoCancelDuration(3, TimeUnit.SECONDS).build()
         cam.cameraControl.startFocusAndMetering(action)
         showFocusRing(x, y)
+        if (portraitOn && b.previewView.width > 0 && b.previewView.height > 0) {
+            focusFx = (x / b.previewView.width).coerceIn(0f, 1f)
+            focusFy = (y / b.previewView.height).coerceIn(0f, 1f)
+            focusTapped = true
+            pushBlur()
+        }
     }
 
     private fun showFocusRing(x: Float, y: Float) {
@@ -941,6 +1085,7 @@ class MainActivity : AppCompatActivity() {
         }
         countdownRunning = true
         var left = timerSeconds
+        b.countdown.textSize = 110f
         b.countdown.visibility = View.VISIBLE
         val r = object : Runnable {
             override fun run() {
@@ -976,6 +1121,7 @@ class MainActivity : AppCompatActivity() {
         // نثبّت الإعدادات لحظة الضغط (حتى لو غيّرها المستخدم أثناء المعالجة)
         val doEnhance = enhance
         val filterMatrix = selectedFilter.matrix
+        val spec = currentPortraitSpec()
 
         sound.play(MediaActionSound.SHUTTER_CLICK)
         b.flashOverlay.alpha = 0.7f
@@ -984,7 +1130,7 @@ class MainActivity : AppCompatActivity() {
         ic.takePicture(options, executor, object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                 val uri = try {
-                    MediaSaver.savePhoto(applicationContext, tmp, doEnhance, filterMatrix)
+                    MediaSaver.savePhoto(applicationContext, tmp, doEnhance, filterMatrix, spec)
                 } catch (_: Throwable) {
                     null
                 } finally {
@@ -1006,6 +1152,88 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread { toast("فشل الالتقاط: ${exception.message}") }
             }
         })
+    }
+
+    private fun currentPortraitSpec(): PortraitSpec? =
+        if (portraitOn) PortraitSpec(
+            blurLevel, focusFx, focusFy, focusTapped,
+            lensFacing == CameraSelector.LENS_FACING_FRONT
+        ) else null
+
+    // ------------------------------------------------------------------ night (multi-frame)
+
+    private fun takeNightPhoto() {
+        val ic = imageCapture ?: return
+        val total = 4
+        val files = ArrayList<File>()
+        val doEnhance = enhance
+        val filterMatrix = selectedFilter.matrix
+        val spec = currentPortraitSpec()
+        nightBusy = true
+        b.countdown.visibility = View.VISIBLE
+        b.countdown.textSize = 60f
+
+        fun finish(ok: Boolean) {
+            if (!ok) {
+                files.forEach { it.delete() }
+                runOnUiThread {
+                    nightBusy = false
+                    b.countdown.visibility = View.GONE
+                    toast("فشل الالتقاط الليلي")
+                }
+                return
+            }
+            runOnUiThread { b.countdown.text = "…" }
+            val stacked = File(cacheDir, "stack_${System.nanoTime()}.jpg")
+            val uri = try {
+                try {
+                    NightStacker.stack(files, stacked)
+                } catch (_: Throwable) {
+                    files[0].copyTo(stacked, overwrite = true)
+                }
+                MediaSaver.savePhoto(applicationContext, stacked, true, filterMatrix, spec, true)
+            } catch (_: Throwable) {
+                null
+            } finally {
+                stacked.delete()
+                files.forEach { it.delete() }
+            }
+            runOnUiThread {
+                nightBusy = false
+                b.countdown.visibility = View.GONE
+                if (uri == null) {
+                    toast("تعذّر حفظ الصورة")
+                } else {
+                    lastUri = uri
+                    lastIsVideo = false
+                    updateThumb()
+                }
+            }
+        }
+
+        fun next() {
+            if (files.size >= total) {
+                finish(true)
+                return
+            }
+            runOnUiThread { b.countdown.text = "${files.size + 1}/$total" }
+            val tmp = File.createTempFile("night_", ".jpg", cacheDir)
+            if (files.isEmpty()) sound.play(MediaActionSound.SHUTTER_CLICK)
+            ic.takePicture(
+                ImageCapture.OutputFileOptions.Builder(tmp).build(), executor,
+                object : ImageCapture.OnImageSavedCallback {
+                    override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                        files += tmp
+                        next()
+                    }
+
+                    override fun onError(exception: ImageCaptureException) {
+                        tmp.delete()
+                        finish(files.isNotEmpty())
+                    }
+                })
+        }
+        next()
     }
 
     // ------------------------------------------------------------------ video

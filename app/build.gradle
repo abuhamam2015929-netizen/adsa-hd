@@ -49,4 +49,7 @@ dependencies {
     implementation "androidx.camera:camera-video:$camerax"
     implementation "androidx.camera:camera-view:$camerax"
     implementation "androidx.camera:camera-extensions:$camerax"
+
+    // عزل الشخص عن الخلفية (بورتريه الصور) - النموذج مضمّن داخل التطبيق
+    implementation 'com.google.mlkit:segmentation-selfie:16.0.0-beta6'
 }
